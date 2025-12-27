@@ -12,97 +12,61 @@ UPLOAD_DIR = "uploads"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-def get_db():
-    return sqlite3.connect(DB)
 
-# --- DB setup ---
-conn = sqlite3.connect(DB, check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS jobs (
-    id TEXT PRIMARY KEY,
-    status TEXT,
-    result TEXT,
-    progress INTEGER DEFAULT 0,
-    created_at TEXT
-)
-""")
-conn.commit()
+def get_db():
+    return sqlite3.connect(DB, check_same_thread=False)
 
 def process_csv(job_id: str, file_path: str):
     db = get_db()
     cursor = db.cursor()
 
-    cursor.execute(
-        "UPDATE jobs SET status=? WHERE id=?",
-        ("RUNNING", job_id)
-    )
-    db.commit()
-
     try:
         cursor.execute(
-            "UPDATE jobs SET progress=? WHERE id=?",
-            (10, job_id)
+            "UPDATE jobs SET status=?, progress=? WHERE id=?",
+            ("RUNNING", 10, job_id)
         )
+        db.commit()
 
         with open(file_path, newline="") as f:
             reader = csv.reader(f)
             rows = list(reader)
 
+        if not rows:
+            raise ValueError("CSV is empty")
+
+        headers = rows[0]
+        data_rows = rows[1:] if len(rows) > 1 else []
+
         result = {
-            "rows": len(rows) - 1,
-            "columns": rows[0]
+            "rows": len(data_rows),
+            "columns": headers
         }
 
         cursor.execute(
-            "UPDATE jobs SET progress=? WHERE id=?",
-            (80, job_id)
+            "UPDATE jobs SET status=?, progress=?, result=? WHERE id=?",
+            ("SUCCESS", 100, json.dumps(result), job_id)
         )
-
-        cursor.execute(
-            "UPDATE jobs SET status=?, result=? WHERE id=?",
-            ("SUCCESS", json.dumps(result), job_id)
-        )
-
-        cursor.execute(
-            "UPDATE jobs SET progress=? WHERE id=?",
-            (100, job_id)
-        )
+        db.commit()
 
     except Exception as e:
+        print("CSV PROCESSING ERROR:", e)
         cursor.execute(
             "UPDATE jobs SET status=?, result=? WHERE id=?",
             ("FAILED", str(e), job_id)
         )
+        db.commit()
 
-    db.commit()
-    db.close()
-    cursor.execute(
-        "UPDATE jobs SET status=? WHERE id=?",
-        ("RUNNING", job_id)
-    )
-    conn.commit()
-
-    with open(file_path, newline="") as f:
-        reader = csv.reader(f)
-        rows = list(reader)
-
-    result = {
-        "rows": len(rows) - 1,
-        "columns": rows[0]
-    }
-
-    cursor.execute(
-        "UPDATE jobs SET status=?, result=? WHERE id=?",
-        ("SUCCESS", str(result), job_id)
-    )
-    conn.commit()
+    finally:
+        db.close()
 
 @app.post("/jobs/upload")
 async def upload_csv(
     file: UploadFile,
     background_tasks: BackgroundTasks
 ):
+    db = get_db()
+    cursor = db.cursor()
+
     job_id = str(uuid.uuid4())
     file_path = f"{UPLOAD_DIR}/{job_id}.csv"
 
@@ -110,10 +74,11 @@ async def upload_csv(
         f.write(await file.read())
 
     cursor.execute(
-        "INSERT INTO jobs VALUES (?, ?, ?, ?)",
-        (job_id, "PENDING", None, datetime.utcnow().isoformat())
+        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?)",
+        (job_id, "PENDING", None, 0, datetime.utcnow().isoformat())
     )
-    conn.commit()
+    db.commit()
+    db.close()
 
     background_tasks.add_task(process_csv, job_id, file_path)
 
@@ -126,19 +91,21 @@ def get_status(job_id: str):
     cursor = db.cursor()
 
     cursor.execute(
-        "SELECT status FROM jobs WHERE id=?", (job_id,)
+        "SELECT status, progress FROM jobs WHERE id=?",
+        (job_id,)
     )
     row = cursor.fetchone()
     db.close()
 
-    if not row:
+    if row is None:
         return {"error": "Job not found"}
 
     status, progress = row
     return {
         "status": status,
-        "progress": progress
+        "progress": progress or 0
     }
+
 
 @app.get("/jobs/{job_id}/result")
 def get_result(job_id: str):
@@ -160,3 +127,20 @@ def get_result(job_id: str):
         return {"status": status}
 
     return json.loads(result)
+
+def init_db():
+    db = sqlite3.connect(DB)
+    cursor = db.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY,
+        status TEXT,
+        result TEXT,
+        progress INTEGER DEFAULT 0,
+        created_at TEXT
+    )
+    """)
+    db.commit()
+    db.close()
+
+init_db()
