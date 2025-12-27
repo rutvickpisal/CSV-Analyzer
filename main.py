@@ -134,7 +134,11 @@ def get_status(job_id: str):
     if not row:
         return {"error": "Job not found"}
 
-    return {"status": row[0]}
+    status, progress = row
+    return {
+        "status": status,
+        "progress": progress
+    }
 
 @app.get("/jobs/{job_id}/result")
 def get_result(job_id: str):
